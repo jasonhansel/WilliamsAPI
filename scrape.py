@@ -1,5 +1,4 @@
-
-# BUG: doesn't get Whitmans' data correctly
+#!/usr/bin/python
 # Check through to make sure other data is correct
 
 # Get all NetNutrtion data, and dump the result to stdout.
@@ -11,7 +10,9 @@ from bs4 import BeautifulSoup
 from collections import namedtuple
 import html.parser
 import re
+import sys
 import json
+import unittest
 
 non_decimal = re.compile(r'[^\d]+')
 
@@ -112,12 +113,16 @@ def getData():
         return { el.string : handleID(non_decimal.sub('', el.attrs['onclick']))
             for el in root.select('.cbo_nn_sideUnitPanelDiv .cbo_nn_sideUnitTable a')}
 
-# enc = MyEncoder()
+class SimpleTest(unittest.TestCase):
+    # This test is only valid on 2017/08/15; NetNutrition may change
+    # after that...
+    def test_20170815(_):
+        with open('output_20170815.json') as file:
+            data = json.load(file)
+            assert(data == getData())
 
-# print(enc.encode(getData()))
-print(json.dumps(getData()))
 
-    #     ) ET.fromstring(page, parser=ET.XMLParser(html=1))
-    # links = root.findall(".//[@class='cbo_nn_sideUnitTable']//a")
-    # for link in links:
-    #     print(link.text)
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    unittest.main(argv=[ sys.argv[0] ])
+else:
+    print(json.dumps(getData()))
