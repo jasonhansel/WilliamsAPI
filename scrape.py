@@ -1,7 +1,13 @@
 #!/usr/bin/python
-# Check through to make sure other data is correct
 
-# Get all NetNutrtion data, and dump the result to stdout.
+# Get NetNutrition data and dump to stdout.
+# Run with 'test' to run a test (may fail if NetNutrition has been updated)
+
+# TODO:
+# - Support putting the output somewhere nice (eg. on S3)
+# - AWS Lambda integration
+# - Error handling
+
 
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -12,36 +18,14 @@ import html.parser
 import re
 import sys
 import json
+import functools
 import unittest
 
 non_decimal = re.compile(r'[^\d]+')
-
-# class ComplexEncoder(json.JSONEncoder):
-#     def default(self, obj):
-#         if isinstance(obj, complex):
-#             return [obj.real, obj.imag]
-#         # Let the base class default method raise the TypeError
-#         return json.JSONEncoder.default(self, obj)
-# print(json.dumps(2 + 1j, cls=ComplexEncoder))
-
-# exit()
-
-# see https://stackoverflow.com/questions/5906831/serializing-a-python-namedtuple-to-json
-# class MyEncoder(json.JSONEncoder):
-#     def iterencode(self, obj, **kwargs):
-#         if(getattr(obj, '_asdict', None)):
-#             obj = obj._asdict()
-#         return json.JSONEncoder.iterencode(self, obj, **kwargs)
-
-#     def encode(self, obj):
-#         if(getattr(obj, '_asdict', None)):
-#             obj = obj._asdict()
-#         return json.JSONEncoder.encode(self, obj)
-
 MealInfo = namedtuple('MealInfo', 'date meal menu')
 MenuSection = namedtuple('MenuSection', 'name items')
 
-def handleItemPanel(str):
+def handleItemPanel(opener,str):
     root = BeautifulSoup(str, "html.parser")
     # also do td:only-child
     sections = []
@@ -55,62 +39,48 @@ def handleItemPanel(str):
             sections.append(MenuSection(header, []))
     return [s._asdict() for s in sections]
 
+def handleMenuPanel(opener,str):
+    root = BeautifulSoup(str, 'html.parser')
+    arr = []
+    for table in root.select('.cbo_nn_menuCell > table'):
+        date = table.contents[0].select_one('td').string
+        for menu in table.select('.cbo_nn_menuLink'):
+            ID = non_decimal.sub('', menu.attrs['onclick'])
+            meal = menu.string
+            yield MealInfo(date, meal, requestFromNN(opener, 'Menu/SelectMenu', 'menuOid', ID))
 
-def handleMenuID(id):
-    params = bytes(urllib.parse.urlencode({'menuOid': id}), 'utf-8')
-    r2 = opener.open("http://nutrition.williams.edu/NetNutrition/1/Menu/SelectMenu", params)
-    with r2 as response:
-        page = response.read()
-        data = {x['id'] : x['html'] for x in json.loads(page)['panels']}
-        return handleItemPanel(data['itemPanel'])
-
-def handleResponse(page):
-    data = {x['id'] : x['html'] for x in json.loads(page)['panels']}
+def handleResponse(opener, page):
+    try:
+        j = json.loads(page)
+    except json.decoder.JSONDecodeError:
+        return None
+    data = {x['id'] : x['html'] for x in j['panels']}
     if data['childUnitsPanel']:
         root = BeautifulSoup(data['childUnitsPanel'], "html.parser")
-        return { el.string : handleChildID(non_decimal.sub('', el.attrs['onclick']))
+        return { el.string : requestFromNN(opener,'Unit/SelectUnitFromChildUnitsList', 'unitOid', non_decimal.sub('', el.attrs['onclick']))
             for el in root.select('a')}
     if data['menuPanel']:
-        root = BeautifulSoup(data['menuPanel'], 'html.parser')
-        arr = []
-        for table in root.select('.cbo_nn_menuCell > table'):
-            name = table.contents[0].select_one('td').string
-            date = name
-            for menu in table.select('.cbo_nn_menuLink'):
-                id = non_decimal.sub('', menu.attrs['onclick'])
-                meal = menu.string
-                arr.append(MealInfo(date, meal, handleMenuID(id)))
-        return [a._asdict() for a in arr]
+        return [a._asdict() for a in handleMenuPanel(opener, data['menuPanel'])]
     if data['itemPanel']:
-        return handleItemPanel(data['itemPanel'])
+        return handleItemPanel(opener, data['itemPanel'])
 
-def handleChildID(id):
-    params = bytes(urllib.parse.urlencode({'unitOid': id}), 'utf-8')
-    r2 = opener.open("http://nutrition.williams.edu/NetNutrition/1/Unit/SelectUnitFromChildUnitsList", params)
-    with r2 as response:
+@functools.lru_cache()
+def requestFromNN(opener, endpoint, param, ID):
+    print('Request:', endpoint, param, ID)
+    params = bytes(urllib.parse.urlencode({param: ID}), 'utf-8')
+    r = opener.open(f"http://nutrition.williams.edu/NetNutrition/1/{endpoint}", params)
+    with r as response:
         page = response.read()
-        return handleResponse(page)
+        return handleResponse(opener, page)
 
-def handleID(id):
-    params = bytes(urllib.parse.urlencode({'unitOid': id}), 'utf-8')
-    r2 = opener.open("http://nutrition.williams.edu/NetNutrition/1/Unit/SelectUnitFromSideBar", params)
-    with r2 as response:
-        page = response.read()
-        return handleResponse(page)
-
-# https://stackoverflow.com/questions/554446/how-do-i-prevent-pythons-urllib2-from-following-a-redirect
-class NoRedirection(urllib.request.HTTPRedirectHandler):
-    def redirect_request(r, f, c, m, h, u, x):
-        return None
-cj = http.cookiejar.CookieJar()
-opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-
-def getData():
+def requestAllNN():
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     r = opener.open("http://nutrition.williams.edu/NetNutrition/")
     with r as response:
         page = response.read()
         root = BeautifulSoup(page, "html.parser")
-        return { el.string : handleID(non_decimal.sub('', el.attrs['onclick']))
+        return { el.string : requestFromNN(opener, 'Unit/SelectUnitFromSideBar', 'unitOid',  non_decimal.sub('', el.attrs['onclick']))
             for el in root.select('.cbo_nn_sideUnitPanelDiv .cbo_nn_sideUnitTable a')}
 
 class SimpleTest(unittest.TestCase):
@@ -118,11 +88,16 @@ class SimpleTest(unittest.TestCase):
     # after that...
     def test_20170815(_):
         with open('output_20170815.json') as file:
-            data = json.load(file)
-            assert(data == getData())
+            test = json.load(file)
+            data = requestAllNN()
+            out = open('output.json', 'w+')
+            out.write(json.dumps(requestAllNN()))
+            out.close()
+            print(json.dumps(requestAllNN()))
+            assert(test == data)
 
 
 if len(sys.argv) > 1 and sys.argv[1] == 'test':
     unittest.main(argv=[ sys.argv[0] ])
 else:
-    print(json.dumps(getData()))
+    print(json.dumps(requestAllNN()))
